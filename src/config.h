@@ -7,9 +7,15 @@
 #include <syslog.h>
 
 // 网络地址最大长度（IPv4地址+端口）
-#define MAX_IP_LEN 16
+#define MAX_IP_LEN 64
 // 协议类型字符串最大长度（如"tcp"/"udp"/"icmp"）
-#define MAX_PROTO_LEN 8
+#define MAX_PROTO_LEN 16
+
+// 错误码定义
+#define CONFIG_OK              0
+#define ERR_UCI_LOAD           1
+#define ERR_MISSING_SECTION    2
+#define ERR_INVALID_VALUE      3
 
 /**
  * 探测器配置结构体
@@ -24,19 +30,9 @@ struct detector_config {
     int log_level;              // 日志级别 0-关闭 1-基础 2-详细
 };
 
-/**
- * 加载配置文件到结构体
- * @param cfg 配置结构体指针
- * @return 错误码（见下方错误码定义）
- */
+// 函数声明
 int config_load(struct detector_config *cfg);
-
-/**
- * 验证配置文件有效性
- * 检查必需字段、值范围等
- * @return 错误码（见下方错误码定义）
- */
-int config_validate();
+int config_validate(const struct detector_config *cfg);
 
 /**
  * 错误码枚举定义
