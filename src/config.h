@@ -12,7 +12,6 @@
 #define MAX_PROTO_LEN 16
 
 // 错误码定义
-#define CONFIG_OK              0
 #define ERR_UCI_LOAD           1
 #define ERR_MISSING_SECTION    2
 #define ERR_INVALID_VALUE      3

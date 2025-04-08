@@ -4,14 +4,17 @@
 #include <uci.h>
 #include <libubox/uloop.h>
 #include <libubox/ustream.h>
+#include <libubox/blobmsg_json.h>
+#include <libubox/blobmsg.h>
 #include <getopt.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include "config.h" // 配置管理头文件
 #include <string.h> // 添加此行以包含 strcmp 函数的声明
+#include "network.h" // 网络管理头文件
+
 
 #define CONFIG_FILE "/etc/config/virtualgw" // 主配置文件路径
-#define CONFIG_SUCCESS 0
 #define __COMMAND_ARGS_MAX 2
 
 // UCI配置操作指针（用于读写配置）
@@ -20,22 +23,11 @@ struct uci_ptr ptr = {
     .section = "global"      // 默认操作配置段
 };
 
-// 在相关头文件中添加函数声明
-int configure_network_interface(const struct detector_config *cfg);
-int check_device_status(struct detector_config *cfg);
-int enable_virtual_interface(void);
-int disable_virtual_interface(void);
-
 // 将command_policy移到全局作用域
 static const struct blobmsg_policy command_policy[] = {
     { .name = "action", .type = BLOBMSG_TYPE_STRING },
     { .name = "param",  .type = BLOBMSG_TYPE_STRING }
 };
-
-// 添加缺失的函数声明
-extern char *get_gw_status(void);
-extern int reload_configuration(void);
-extern int switch_interface(const char *param);
 
 /**
  * 初始化网络接口配置
