@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include "config.h" // 配置管理头文件
+#include <string.h> // 添加此行以包含 strcmp 函数的声明
 
 #define CONFIG_FILE "/etc/config/virtualgw" // 主配置文件路径
 
@@ -16,6 +17,12 @@ struct uci_ptr ptr = {
     .package = "virtualgw",  // 配置包名称
     .section = "global"      // 默认操作配置段
 };
+
+// 在相关头文件中添加函数声明
+int configure_network_interface(const struct detector_config *cfg);
+int check_device_status(struct detector_config *cfg);
+int enable_virtual_interface(void);
+int disable_virtual_interface(void);
 
 /**
  * 初始化网络接口配置
@@ -126,3 +133,4 @@ int check_device_status(struct detector_config *cfg) {
     int ret = system(cmd);
     return WEXITSTATUS(ret) == 0 ? 1 : 0;
 }
+
