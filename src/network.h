@@ -1,5 +1,8 @@
-// 假设你未来会放到 network.c 里
-int configure_network_interface(const struct detector_config *cfg);
-int enable_virtual_interface();
-int disable_virtual_interface();
-int check_device_status(struct detector_config *cfg);
+#include "config.h"
+int configure_network_interface(const struct config *cfg);
+int enable_network_interface(const char *ifname);
+int disable_network_interface(const char *ifname);
+int enable_ping_response();
+int disable_ping_response();
+
+

@@ -1,0 +1,125 @@
+#!/bin/sh /etc/rc.common
+
+# 启动和停止的优先级
+START=99          # 启动时机，数值越小越先启动
+STOP=10           # 停止时机，数值越小越先停止
+
+# 使用 procd 启动服务
+USE_PROCD=1
+
+# 设置为默认禁用
+ENABLED=0
+# 服务的二进制程序路径
+PROG=/usr/bin/virtualgw
+
+# 配置文件的名称（对应 /etc/config/virtualgw）
+CONFIG=virtualgw
+
+# 是否写入 PID 文件
+SERVICE_WRITE_PID=1
+
+# 日志文件路径
+LOGFILE="/var/log/virtualgw.log"
+
+# 确保日志文件存在
+ensure_logfile_exists() {
+    [ -f "$LOGFILE" ] || touch "$LOGFILE"
+    chmod 644 "$LOGFILE"
+}
+
+# 启动服务的函数
+start_service() {
+    config_load 'virtualgw'
+    config_get_bool ENABLED 'global' 'enabled' 0
+    [ "$ENABLED" -eq 1 ] || return 0
+    ensure_logfile_exists
+    echo "[$(date)] Starting virtualgw..." >> "$LOGFILE"
+
+    procd_open_instance
+    procd_set_param command "$PROG" --verbose --debug --config /etc/config/virtualgw
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param user root
+    procd_set_param pidfile "/var/run/virtualgw.pid"
+
+    procd_close_instance
+
+    echo "[$(date)] Start command executed" >> "$LOGFILE"
+}
+
+# 定义服务触发器：当配置文件更改时触发服务重载
+service_triggers() {
+    procd_add_reload_trigger "virtualgw"
+}
+
+stop_service() {
+    echo "停止virtualgw服务"
+    killall -SIGTERM virtualgw 2>/dev/null
+    sleep 1
+    # 强制清理残留锁
+    [ -f "/var/lock/gw_side.lock" ] && {
+        echo "清理残留文件锁"
+        flock -u /var/lock/gw_side.lock
+        rm -f /var/lock/gw_side.lock
+    }
+    return 0
+}
+
+restart_service() {
+    ensure_logfile_exists
+    echo "[$(date)] Restarting virtualgw..." >> "$LOGFILE"
+    stop_service
+    start_service
+}
+
+status_service() {
+    if [ -f "/var/run/virtualgw.pid" ]; then
+        PID=$(cat "/var/run/virtualgw.pid")
+        if ps | grep -qE "^ *$PID "; then
+            echo "Running (PID: $PID)"
+            return 0
+        else
+            echo "PID file exists but process not found"
+            return 1
+        fi
+    else
+        echo "Not running"
+        return 3
+    fi
+}
+
+uninstall_service() {
+    echo "卸载virtualgw服务及相关配置..."
+    
+    # 先停止服务
+    stop_service
+    
+    # 禁用服务自启动
+    /etc/init.d/virtualgw disable
+    
+    # 删除网络接口配置
+    uci delete network.virtual_gw 2>/dev/null
+    
+    # 删除防火墙规则
+    uci delete firewall.virtual_gw_lan_offline 2>/dev/null
+    
+    # 提交配置更改
+    uci commit network
+    uci commit firewall
+    
+    # 重启网络和防火墙服务
+    /etc/init.d/network restart
+    /etc/init.d/firewall reload
+    
+    # 清理日志文件
+    [ -f "$LOGFILE" ] && rm -f "$LOGFILE"
+    
+    # 清理PID文件
+    [ -f "/var/run/virtualgw.pid" ] && rm -f "/var/run/virtualgw.pid"
+    
+    # 清理锁文件
+    [ -f "/var/lock/gw_side.lock" ] && rm -f "/var/lock/gw_side.lock"
+    
+    echo "virtualgw服务及配置已卸载"
+    return 0
+}

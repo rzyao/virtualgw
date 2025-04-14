@@ -2,7 +2,14 @@
 #include <uci.h>
 #include <sys/wait.h>
 #include <syslog.h>
-
+#include <stdlib.h>
+#include "config.h"
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>    // for sleep()
+#include "status.h"
 /**
  * 配置虚拟网关网络接口
  * @return 状态码（0=成功，负数=错误码）
@@ -20,67 +27,87 @@
  * -3: 参数设置失败
  * -4: 配置提交失败
  */
-int configure_network_interface(const struct detector_config *cfg) {
+int configure_network_interface(const struct config *cfg) {
+    syslog(LOG_ERR, "[Network] 执行configure_network_interface");
     struct uci_context *ctx = uci_alloc_context(); // UCI配置上下文
     struct uci_package *pkg = NULL;                // network配置包指针
     int ret = 0;                                   // 返回值初始化
 
     // 加载network配置（路径为/etc/config/network）
     if (uci_load(ctx, "network", &pkg) != UCI_OK) {
+        syslog(LOG_ERR, "[Network] network配置读取失败");
         uci_free_context(ctx);
         return -1; // 错误码-1：配置加载失败
     }
-
-    // 准备接口配置操作指针
-    struct uci_ptr ptr = {
-        .package = "network",      // 操作目标配置包
-        .section = "virtual_gw",   // 目标配置段名称
-        .option = NULL,            // 动态设置选项名
-        .value = NULL              // 动态设置选项值
-    };
+    syslog(LOG_ERR, "[Network] network配置读取成功");
 
     // 检查virtual_gw接口段是否存在
-    if (!uci_lookup_section(ctx, pkg, "virtual_gw")) {
+    struct uci_section *sec = uci_lookup_section(ctx, pkg, "virtual_gw");
+    if (!sec) {
+        syslog(LOG_DEBUG, "创建virtual_gw段");
         struct uci_section *interface_sec;
-        
+
         // 创建新接口段（类型为interface）
         if (uci_add_section(ctx, pkg, "interface", &interface_sec) != UCI_OK) {
-            ret = -2; // 错误码-2：接口创建失败
+            ret = -2;
             goto cleanup;
         }
-        
-        // 重命名新创建的段为virtual_gw
-        uci_rename_section(ctx, interface_sec, "virtual_gw");
+        syslog(LOG_ERR, "[Network] 接口段创建成功");
+
+        // 新增段重命名操作（关键修复）
+        struct uci_ptr rename_ptr = {
+            .package = "network",
+            .section = interface_sec->e.name,
+            .value = "virtual_gw"
+        };
+        if (uci_rename(ctx, &rename_ptr) != UCI_OK) {
+            syslog(LOG_ERR, "[Network] 段重命名失败");
+            ret = -3;
+            goto cleanup;
+        }
+        syslog(LOG_ERR, "[Network] 段重命名成功");
     }
+    
 
     /* 静态网络参数配置表
      * 格式：选项名，选项值，以NULL结尾
      * 包含协议类型、设备名称、IP地址等关键参数
      */
     const char *options[] = {
+        "device",   cfg->interface.device,       // 绑定物理网卡
         "proto",    "static",     // 使用静态IP协议
-        "device",   "eth0",       // 绑定物理网卡
-        "ipaddr",   "192.168.50.5", // 虚拟网关IP
-        "netmask",  "255.255.255.0", // 子网掩码
-        "gateway",  "192.168.50.1",  // 默认网关
+        "ipaddr",   cfg->interface.ipaddr, // 虚拟网关IP
+        "netmask",  cfg->interface.netmask, // 子网掩码
+        "auto",     "0", // 止该网络接口在系统启动或网络服务重启时自动启用
         NULL // 结束标记
     };
 
-    // 遍历配置表设置参数
+    // 修改参数设置循环，使用验证后的sec指针
+    syslog(LOG_ERR, "[Network] 开始设置接口参数");
     for (int i = 0; options[i]; i += 2) {
-        ptr.option = options[i];   // 设置当前选项名
-        ptr.value = options[i+1];  // 设置当前选项值
+        syslog(LOG_ERR, "[Network] 设置参数：%s=%s", options[i], options[i+1]);
+        struct uci_ptr param_ptr = {
+            .package = "network",
+            .section = "virtual_gw",  // 使用实际的段名称
+            .option = options[i],
+            .value = options[i+1]
+        };
         
-        if (uci_set(ctx, &ptr) != UCI_OK) {
-            ret = -3; // 错误码-3：参数设置失败
+        if (uci_set(ctx, &param_ptr) != UCI_OK) {
+            syslog(LOG_ERR, "参数设置失败");
+            ret = -3;
             goto cleanup;
         }
     }
+    syslog(LOG_ERR, "[Network] 接口参数设置成功");
 
     // 提交配置变更到持久化存储
     if (uci_commit(ctx, &pkg, false) != UCI_OK) {
-        ret = -4; // 错误码-4：提交失败
+        syslog(LOG_ERR, "[Network] 配置提交失败");
+        ret = -4;
+        goto cleanup;
     }
+    syslog(LOG_ERR, "[Network] 接口配置保存成功");
 
 cleanup:
     // 资源清理（逆序释放）
@@ -89,138 +116,107 @@ cleanup:
     return ret;
 }
 
+
 /**
- * 设置网络接口启用状态
+ * 启用网络接口
  * @param ifname 接口名称（如"virtual_gw"）
- * @param enable 启用标志（1=启用，0=禁用）
  * @return 状态码（0=成功，负数=错误码）
  * 
- * 实现原理：
- * 通过设置/删除"disabled"选项控制接口状态：
- * - 启用：删除disabled选项
- * - 禁用：设置disabled=1
  */
-int set_interface_status(const char *ifname, int enable) {
-    struct uci_context *ctx = uci_alloc_context();
-    struct uci_ptr ptr = {
-        .package = "network",    // 操作network配置
-        .section = ifname,       // 目标接口段
-        .option = "disabled",    // 操作目标选项
-        .value = enable ? NULL : "1" // 禁用时设为"1"
-    };
-
-    int ret = 0;
-    
-    // 查找配置指针
-    if (uci_lookup_ptr(ctx, &ptr, NULL, true) != UCI_OK) {
-        ret = -1; // 错误码-1：配置查找失败
-        goto cleanup;
-    }
-
-    if (enable) {
-        // 启用接口：删除disabled选项
-        if (uci_delete(ctx, &ptr) != UCI_OK) {
-            ret = -2; // 错误码-2：删除操作失败
+int enable_network_interface(const char *ifname) {
+    if (gw_status != 0) {
+        int count = 0;
+        system("ifup virtual_gw");
+        while (is_gw_up(ifname) != 0)
+        {
+            sleep(1);
+            count++;
+            if (count > 10) {
+                syslog(LOG_ERR, "[Network] 接口启动失败");
+                return -1;
+            }
         }
-    } else {
-        // 禁用接口：设置disabled=1
-        if (uci_set(ctx, &ptr) != UCI_OK) {
-            ret = -3; // 错误码-3：设置操作失败
-        }
-    }
-
-    // 提交变更（仅在操作成功时）
-    if (ret == 0) {
-        if (uci_commit(ctx, &ptr.p, false) != UCI_OK) {
-            ret = -4; // 错误码-4：提交失败
-        }
-    }
-
-cleanup:
-    uci_free_context(ctx);
-    return ret;
-}
-
-/**
- * 安全执行ubus调用（带超时和错误检查）
- * @param service 服务名称（如"network"）
- * @param method  方法名称（如"reload"）
- * @return 状态码（0=成功，-1=执行失败）
- * 
- * 实现特点：
- * - 使用system执行命令
- * - 超时5秒（-t 5参数）
- * - 检查子进程退出状态
- * - 记录详细错误日志
- */
-int safe_ubus_call(const char *service, const char *method) {
-    char cmd[128];
-    // 构造ubus命令（格式：ubus -t 5 call 服务 方法）
-    snprintf(cmd, sizeof(cmd), "ubus -t 5 call %s %s", service, method);
-    
-    int ret = system(cmd); // 执行系统命令
-    
-    // 解析子进程退出状态
-    if (WIFEXITED(ret)) {
-        int exit_code = WEXITSTATUS(ret);
-        if (exit_code != 0) {
-            syslog(LOG_ERR, "%s.%s失败，错误码：%d", 
-                  service, method, exit_code);
-            return -1;
-        }
+        syslog(LOG_ERR, "[Network] 接口启动成功");
+        gw_status = 0;
     }
     return 0;
 }
 
 /**
- * 重新加载网络配置
- * @return ubus调用结果
- */
-int reload_network_config() {
-    return safe_ubus_call("network", "reload");
-}
-
-/**
- * 重新加载防火墙配置
- * @return ubus调用结果
- */
-int reload_firewall_config() {
-    return safe_ubus_call("firewall", "reload");
-}
-
-/**
- * 启用虚拟接口（组合操作）
+ * 设置网络接口禁用
+ * @param ifname 接口名称（如"virtual_gw"）
  * @return 状态码（0=成功，负数=错误码）
  * 
- * 执行流程：
- * 1. 启用网络接口（删除disabled标记）
- * 2. 重载网络配置
- * 3. 重载防火墙规则
  */
-int enable_virtual_interface() {
-    int ret = set_interface_status("virtual_gw", 1);
-    if (ret == 0) {
-        // 顺序执行重载操作（网络->防火墙）
-        reload_network_config();
-        reload_firewall_config();
+int disable_network_interface(const char *ifname) {
+    if (gw_status != 1) {
+        system("ifdown virtual_gw");
+        
+        // 添加验证逻辑
+        int count = 0;
+        while (is_gw_up(ifname) == 0) {
+            sleep(1);
+            count++;
+            if (count > 10) {
+                syslog(LOG_ERR, "[Network] 接口关闭失败");
+                break;  // 即使失败也继续
+            }
+        }
+        gw_status = 1;
     }
-    return ret;
+    return 0;
 }
 
 /**
- * 禁用虚拟接口（组合操作）
- * @return 状态码（0=成功，负数=错误码）
- * 
- * 执行流程：
- * 1. 禁用网络接口（设置disabled=1）
- * 2. 重载网络配置
- * 3. 重载防火墙规则
+ * 禁用LAN接口的ping响应
+ * @return 状态码（0=成功，非0=失败）
  */
-int disable_virtual_interface() {
-    int ret = set_interface_status("virtual_gw", 0);
+int disable_ping_response() {
+    int ret = 0;
+    
+    // 检查规则是否已存在
+    ret = system("uci -q get firewall.virtual_gw_lan_offline >/dev/null 2>&1");
+    
     if (ret == 0) {
-        reload_network_config();
-        reload_firewall_config();
+        // 规则已存在，删除启用标志
+        system("uci -q delete firewall.virtual_gw_lan_offline.enabled >/dev/null 2>&1");
+    } else {
+        // 创建新的防火墙规则
+        system("uci -q batch <<-EOF >/dev/null 2>&1\n"
+               "set firewall.virtual_gw_lan_offline=rule\n"
+               "set firewall.virtual_gw_lan_offline.name=Virtual-Gateway-LAN-Offline\n"
+               "set firewall.virtual_gw_lan_offline.src=lan\n"
+               "set firewall.virtual_gw_lan_offline.proto=icmp\n"
+               "set firewall.virtual_gw_lan_offline.icmp_type=echo-request\n"
+               "set firewall.virtual_gw_lan_offline.family=ipv4\n"
+               "set firewall.virtual_gw_lan_offline.target=DROP\n"
+               "EOF");
     }
-    return ret;
+    
+    // 提交配置并重载防火墙
+    system("uci commit firewall");
+    system("/etc/init.d/firewall reload >/dev/null 2>&1");
+    
+    return 0;
 }
+
+/**
+ * 启用LAN接口的ping响应
+ * @return 状态码（0=成功，非0=失败）
+ */
+int enable_ping_response() {
+    // 设置规则为禁用状态（UCI中0=禁用规则，相当于允许ping）
+    system("uci -q set firewall.virtual_gw_lan_offline.enabled=0 >/dev/null 2>&1");
+    
+    // 提交配置并重载防火墙
+    system("uci commit firewall");
+    system("/etc/init.d/firewall reload >/dev/null 2>&1");
+    
+    return 0;
+}
+
+
+
+
+
+   

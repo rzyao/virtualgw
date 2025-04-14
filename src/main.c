@@ -1,149 +1,186 @@
+/**
+ * @file main.c
+ * @brief 虚拟网关主程序
+ * 
+ * 主要功能：
+ * 1. 加载并验证配置文件
+ * 2. 初始化网络接口配置
+ * 3. 持续监测目标设备状态
+ * 4. 根据设备状态切换虚拟网关
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <uci.h>
-#include <libubox/uloop.h>
-#include <libubox/ustream.h>
-#include <getopt.h>
-#include <fcntl.h>
-#include <sys/file.h>
-#include "config.h" // 配置管理头文件
-#include <string.h> // 添加此行以包含 strcmp 函数的声明
+#include <unistd.h>          // POSIX操作系统API（sleep等）
+#include <uci.h>             // OpenWrt配置管理库
+#include <libubox/uloop.h>   // 事件循环库
+#include <libubox/ustream.h> // 流处理库
+#include <getopt.h>          // 命令行参数解析
+#include <fcntl.h>           // 文件控制选项
+#include <sys/file.h>        // 文件锁定功能
+#include <string.h>          // 字符串处理函数
+#include <libubox/blobmsg.h> // UBus消息处理
+#include "config.h"          // 配置文件解析头文件
+#include "network.h"         // 网络接口管理头文件
+#include <pthread.h>         // 线程库
+#include "master.h"
+#include "side.h"
+#include <signal.h>
+#include <errno.h>
 
+// 常量定义
 #define CONFIG_FILE "/etc/config/virtualgw" // 主配置文件路径
-#define CONFIG_SUCCESS 0
-#define __COMMAND_ARGS_MAX 2
+#define CONFIG_SUCCESS 0                    // 配置操作成功状态码
+#define __COMMAND_ARGS_MAX 2                // 最大命令参数数量
+#define EXIT_CONFIG_ERROR 10
+#define EXIT_NETWORK_ERROR 20
 
-// UCI配置操作指针（用于读写配置）
-struct uci_ptr ptr = {
-    .package = "virtualgw",  // 配置包名称
-    .section = "global"      // 默认操作配置段
-};
+// 锁文件定义
+#define LOCK_MASTER "/var/lock/gw_master.lock"
+#define LOCK_SIDE   "/var/lock/gw_side.lock"
 
-// 在相关头文件中添加函数声明
-int configure_network_interface(const struct detector_config *cfg);
-int check_device_status(struct detector_config *cfg);
-int enable_virtual_interface(void);
-int disable_virtual_interface(void);
+// 全局锁描述符
+static int master_lock_fd = -1;
+static int side_lock_fd = -1;
 
-// 将command_policy移到全局作用域
-static const struct blobmsg_policy command_policy[] = {
-    { .name = "action", .type = BLOBMSG_TYPE_STRING },
-    { .name = "param",  .type = BLOBMSG_TYPE_STRING }
-};
-
-// 添加缺失的函数声明
-extern char *get_gw_status(void);
-extern int reload_configuration(void);
-extern int switch_interface(const char *param);
-
-/**
- * 初始化网络接口配置
- * @return 状态码（0=成功，负数=错误码）
- * 
- * 执行流程：
- * 1. 加载网络接口配置参数
- * 2. 调用configure_network_interface创建/更新接口
- * 3. 如果失败则记录错误日志
- */
-static int init_network_interface(const struct detector_config *cfg) {
-    int ret = configure_network_interface(cfg); // 直接传递已加载的配置
-    if (ret != 0) {
-        syslog(LOG_ERR, "网络接口配置失败，错误码: %d", ret);
-        return -1;
+// 预清理函数
+static void cleanup_locks() {
+    // 尝试清理主路由锁
+    int pre_fd = open(LOCK_MASTER, O_CREAT|O_RDWR, 0666);
+    if (pre_fd >= 0 && flock(pre_fd, LOCK_EX | LOCK_NB) == 0) {
+        unlink(LOCK_MASTER);
+        close(pre_fd);
     }
-    return 0;
+    
+    // 尝试清理旁路由锁
+    pre_fd = open(LOCK_SIDE, O_CREAT|O_RDWR, 0666);
+    if (pre_fd >= 0 && flock(pre_fd, LOCK_EX | LOCK_NB) == 0) {
+        unlink(LOCK_SIDE);
+        close(pre_fd);
+    }
+}
+
+// 信号处理
+static void sig_handler(int sig) {
+    syslog(LOG_NOTICE, "[Main] 收到终止信号 %d", sig);
+    
+    // 释放主路由锁
+    if (master_lock_fd != -1) {
+        flock(master_lock_fd, LOCK_UN);
+        close(master_lock_fd);
+        unlink(LOCK_MASTER);
+    }
+    
+    // 释放旁路由锁
+    if (side_lock_fd != -1) {
+        flock(side_lock_fd, LOCK_UN);
+        close(side_lock_fd);
+        unlink(LOCK_SIDE);
+    }
+    
+    exit(EXIT_SUCCESS);
 }
 
 /**
- * 主程序入口
- * @param argc 参数个数
- * @param argv 参数数组
+ * @struct uci_ptr
+ * @brief UCI配置操作指针
+ * 
+ * 用于读写UCI配置的结构体，包含：
+ * @var package 配置包名称（对应/etc/config/目录下的文件名）
+ * @var section 配置段名称（配置文件中的section）
+ */
+struct uci_ptr ptr = {
+    .package = "virtualgw",  // 操作virtualgw配置文件
+    .section = "global"      // 默认操作global配置段
+};
+
+
+/**
+ * @var command_policy
+ * @brief UBus命令解析策略
+ * 
+ * 定义从UBus接收的命令参数结构：
+ * [0] action - 要执行的操作（字符串类型）
+ * [1] param  - 操作参数（字符串类型）
+ */
+const struct blobmsg_policy command_policy[__COMMAND_ARGS_MAX] = {
+    [0] = { .name = "action", .type = BLOBMSG_TYPE_STRING }, // 操作类型
+    [1] = { .name = "param",  .type = BLOBMSG_TYPE_STRING }  // 操作参数
+};
+
+/*-----------------------------------------------------------------------------
+ * 主程序
+ *----------------------------------------------------------------------------*/
+
+/**
+ * @brief 程序主入口
+ * @param argc 命令行参数个数
+ * @param argv 命令行参数数组
  * @return 程序退出状态码
+ * 
+ * 主要执行流程：
+ * 1. 加载并验证配置
+ * 2. 初始化网络接口
+ * 3. 初始化VRRP检测
+ * 4. 进入主检测循环
  */
 int main(int argc, char *argv[]) {
-    struct detector_config cfg = {0}; // 配置结构体初始化
+    openlog("virtualgw", LOG_PID|LOG_CONS, LOG_DAEMON);
+    struct config cfg = {0}; // 初始化配置结构体
     
-    // 1. 加载配置
+    //------------------------ 配置加载阶段 ------------------------
+    syslog(LOG_ERR, "[main] 开始加载配置");
     int config_status = config_load(&cfg);
-    if (config_status != CONFIG_OK) {
-        syslog(LOG_CRIT, "配置加载错误: %d", config_status);
-        exit(EXIT_FAILURE);
+    if (config_status != CONFIG_ERR_OK) {
+        syslog(LOG_CRIT, "[CONFIG] Load failed, error code: %d", config_status);
+        exit(EXIT_CONFIG_ERROR);
     }
+    syslog(LOG_ERR, "[main] 配置加载成功");
 
-    // 2. 配置验证（新增前置验证）
-    if (config_validate(&cfg) != CONFIG_OK) {
-        syslog(LOG_CRIT, "配置验证失败");
-        exit(EXIT_FAILURE); // 验证不通过直接退出
-    }
-
-    // 3. 初始化网络接口（使用已验证的配置）
-    int network_init = init_network_interface(&cfg);
+    //--------------------- 网络接口初始化阶段 ---------------------
+    syslog(LOG_ERR, "[main] 开始初始化网络接口");
+    int network_init = configure_network_interface(&cfg);
     if (network_init != 0) {
+        syslog(LOG_CRIT, "[NETWORK] 网络接口初始化失败, 错误码: %d", network_init);
+        exit(EXIT_NETWORK_ERROR);
+    }
+    syslog(LOG_ERR, "[main] 网络接口初始化成功");
+    
+    // 注册信号处理
+    signal(SIGTERM, sig_handler);
+    signal(SIGINT, sig_handler);
+    signal(SIGQUIT, sig_handler);
+    
+    // 预清理
+    cleanup_locks();
+    
+    // 根据角色获取对应锁
+    int is_master = (strcmp(cfg.global.state, "master") == 0);
+    const char *lock_file = is_master ? LOCK_MASTER : LOCK_SIDE;
+    int *lock_fd = is_master ? &master_lock_fd : &side_lock_fd;
+    
+    // 获取角色专属锁
+    *lock_fd = open(lock_file, O_CREAT|O_RDWR, 0666);
+    if (flock(*lock_fd, LOCK_EX | LOCK_NB) != 0) {
+        syslog(LOG_CRIT, "[Main] %s 已锁定，服务可能已运行", lock_file);
         exit(EXIT_FAILURE);
     }
 
-    // 状态跟踪变量（-1=初始状态，0=正常模式，1=虚拟网关模式）
-    static int current_gw_state = -1; 
-    
-    // 创建并锁定进程锁文件（防止多实例运行）
-    int lock_fd = open("/var/lock/gw_switch.lock", O_CREAT|O_RDWR, 0666);
-
-    // 主检测循环
+    // 修改关闭逻辑
+    if (is_master) { 
+        syslog(LOG_ERR, "[main] 当前设备为主路由");
+        master_loop(&cfg);
+    }
+    else {
+        syslog(LOG_ERR, "[main] 当前设备为旁路由");
+        side_loop(&cfg);
+    }
+    // 主循环（替换原有close(lock_fd)）
     while(1) {
-        flock(lock_fd, LOCK_EX); // 获取排他锁
-        
-        // 检测目标设备状态（0=离线，1=在线）
-        int current_status = check_device_status(&cfg);
-        
-        /* 状态切换逻辑：
-         * - 设备离线且未启用虚拟网关时：启用
-         * - 设备恢复在线且虚拟网关仍启用时：禁用
-         */
-        if (current_status == 0 && current_gw_state != 1) { 
-            syslog(LOG_WARNING, "设备离线，启用虚拟网关");
-            if (enable_virtual_interface() == 0) {
-                current_gw_state = 1; // 更新状态标记
-            }
-        } 
-        else if (current_status == 1 && current_gw_state != 0) {
-            syslog(LOG_NOTICE, "设备恢复，禁用虚拟网关");
-            if (disable_virtual_interface() == 0) {
-                current_gw_state = 0; // 重置状态标记
-            }
-        }
-        
-        flock(lock_fd, LOCK_UN); // 释放锁
-        sleep(cfg.interval);     // 按配置间隔休眠
+        pause(); // 等待信号
     }
     
-    close(lock_fd);
+    // 理论上不会执行到这里
+    closelog();
     return 0;
 }
-
-/**
- * 检测目标设备可达性
- * @param cfg 包含检测参数的配置结构体
- * @return 1=设备在线 0=设备离线
- */
-int check_device_status(struct detector_config *cfg) {
-    char cmd[128]; // 命令缓冲区
-    
-    // 根据协议类型生成检测命令
-    if (strcmp(cfg->proto, "tcp") == 0) {
-        // TCP检测（使用netcat检查端口连通性）
-        snprintf(cmd, sizeof(cmd), 
-            "nc -z -w 2 %s %d > /dev/null", 
-            cfg->ip, cfg->port);
-    } else {
-        // ICMP检测（使用ping命令）
-        snprintf(cmd, sizeof(cmd), 
-            "ping -c 1 -W 2 %s > /dev/null", 
-            cfg->ip);
-    }
-    
-    // 执行检测命令并获取返回值
-    int ret = system(cmd);
-    return WEXITSTATUS(ret) == 0 ? 1 : 0;
-}
-

@@ -6,43 +6,54 @@
 // 系统日志库头文件，用于记录运行日志
 #include <syslog.h>
 
-// 网络地址最大长度（IPv4地址+端口）
-#define MAX_IP_LEN 64
+// 错误码枚举定义
+typedef enum {
+    CONFIG_ERR_OK = 0,            // 成功
+    CONFIG_ERR_MEM,               // 内存分配失败
+    CONFIG_ERR_FILE,              // 文件操作错误
+    CONFIG_ERR_SECTION,           // 配置段缺失
+    CONFIG_ERR_INVALID_VALUE,     // 无效参数值
+    CONFIG_ERR_MISSING_SECTION,   // 配置段缺失
+    CONFIG_ERR_UCI_LOAD           // UCI配置加载失败
+} config_error_t;
+
+// 默认检测间隔（秒）
+#define DEFAULT_INTERVAL 5
+
+// 网络地址/域名最大长度
+#define MAX_IP_LEN 256  // 增加到256以支持长域名（DNS标准允许最长253字符）
 // 协议类型字符串最大长度（如"tcp"/"udp"/"icmp"）
 #define MAX_PROTO_LEN 16
-
-// 错误码定义
-#define CONFIG_OK              0
-#define ERR_UCI_LOAD           1
-#define ERR_MISSING_SECTION    2
-#define ERR_INVALID_VALUE      3
+#define MAX_DEVICE_LEN 16
+#define MAX_NAME_LEN 64
 
 /**
- * 探测器配置结构体
- * 对应/etc/config/virtualgw配置文件中的参数
+ * 完整配置结构体
+ * 对应/etc/config/virtualgw配置文件结构
  */
-struct detector_config {
-    char ip[MAX_IP_LEN];        // 目标检测IP地址（对应配置中的ipaddr选项）
-    int port;                   // 检测端口（TCP/UDP检测时生效）
-    char proto[MAX_PROTO_LEN];  // 检测协议类型（icmp/tcp/udp）
-    int interval;               // 检测间隔时间（秒）
-    int retry_count;            // 失败重试次数阈值
-    int log_level;              // 日志级别 0-关闭 1-基础 2-详细
+struct config {
+    /*----- 全局配置 -----*/
+    struct {
+        int log_level;      // 日志级别 0-关闭 1-基础 2-详细
+        char state[16];     // 路由状态 master/side
+        char detect_src_addr[MAX_IP_LEN]; // 检测目标（可以是域名如www.baidu.com或IP地址）
+        int check_interval; // 检测间隔（秒）
+    } global;
+
+    /*----- 虚拟接口配置 -----*/
+    struct {
+        char proto[MAX_PROTO_LEN];  // 协议类型 static/dhcp
+        char device[MAX_DEVICE_LEN];// 绑定物理设备
+        char ipaddr[MAX_IP_LEN];    // 虚拟接口IP
+        char netmask[MAX_IP_LEN];   // 子网掩码
+    } interface;
 };
 
 // 函数声明
-int config_load(struct detector_config *cfg);
-int config_validate(const struct detector_config *cfg);
-
-/**
- * 错误码枚举定义
- * 负数表示错误，0表示成功
- */
-enum {
-    CONFIG_OK = 0,              // 配置操作成功
-    ERR_UCI_LOAD = -1,          // UCI配置加载失败
-    ERR_MISSING_SECTION = -2,   // 缺少必需的配置段（如global段）
-    ERR_INVALID_VALUE = -3      // 无效的配置值（如非数字interval）
-};
+config_error_t config_load(struct config *cfg);
+extern int uci_get_int_default(struct uci_context *ctx, struct uci_section *s,
+                              const char *option, int def);
+extern int uci_get_bool_default(struct uci_context *ctx, struct uci_section *s,
+                               const char *option, int def);
 
 #endif 

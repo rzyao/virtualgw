@@ -1,0 +1,11 @@
+{
+  "files.associations": {
+    "*.html": "html",
+    ".env.developlent": "javascript",
+    "typeinfo": "c",
+    "wait.h": "c",
+    "pthread.h": "c",
+    "fcntl.h": "c",
+    "file.h": "c"
+  }
+}

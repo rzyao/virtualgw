@@ -1,5 +1,21 @@
+
+rm /tmp/.uci/virtualgw 2>/dev/null
+/etc/init.d/virtualgw restart
+
 # 启动服务（安装后首次需要手动启动）
 /etc/init.d/virtualgw start
+/etc/init.d/virtualgw stop
+
+# 
+strace -e trace=file /usr/bin/virtualgw -v -d
+
+# 查看日志
+logread | grep virtualgw
+
+
+
+# 重启 logd 以清空当前日志
+/etc/init.d/virtualgw stop && /etc/init.d/log restart
 
 # 设置开机自启
 /etc/init.d/virtualgw enable
