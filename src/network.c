@@ -28,7 +28,7 @@
  * -4: 配置提交失败
  */
 int configure_network_interface(const struct config *cfg) {
-    syslog(LOG_ERR, "[Network] 执行configure_network_interface");
+    syslog(LOG_INFO, "[Network] 配置网络接口");
     struct uci_context *ctx = uci_alloc_context(); // UCI配置上下文
     struct uci_package *pkg = NULL;                // network配置包指针
     int ret = 0;                                   // 返回值初始化
@@ -39,20 +39,20 @@ int configure_network_interface(const struct config *cfg) {
         uci_free_context(ctx);
         return -1; // 错误码-1：配置加载失败
     }
-    syslog(LOG_ERR, "[Network] network配置读取成功");
+    syslog(LOG_INFO, "[Network] network配置读取成功");
 
     // 检查virtual_gw接口段是否存在
     struct uci_section *sec = uci_lookup_section(ctx, pkg, "virtual_gw");
     if (!sec) {
-        syslog(LOG_DEBUG, "创建virtual_gw段");
+        syslog(LOG_INFO, "virtual_gw接口不存在，创建virtual_gw接口");
         struct uci_section *interface_sec;
 
         // 创建新接口段（类型为interface）
         if (uci_add_section(ctx, pkg, "interface", &interface_sec) != UCI_OK) {
+            syslog(LOG_ERR, "[Network] 接口创建失败");
             ret = -2;
             goto cleanup;
         }
-        syslog(LOG_ERR, "[Network] 接口段创建成功");
 
         // 新增段重命名操作（关键修复）
         struct uci_ptr rename_ptr = {
@@ -61,11 +61,10 @@ int configure_network_interface(const struct config *cfg) {
             .value = "virtual_gw"
         };
         if (uci_rename(ctx, &rename_ptr) != UCI_OK) {
-            syslog(LOG_ERR, "[Network] 段重命名失败");
+            syslog(LOG_ERR, "[Network] 接口重命名失败");
             ret = -3;
             goto cleanup;
         }
-        syslog(LOG_ERR, "[Network] 段重命名成功");
     }
     
 
@@ -83,9 +82,9 @@ int configure_network_interface(const struct config *cfg) {
     };
 
     // 修改参数设置循环，使用验证后的sec指针
-    syslog(LOG_ERR, "[Network] 开始设置接口参数");
+    syslog(LOG_INFO, "[Network] 开始设置接口参数");
     for (int i = 0; options[i]; i += 2) {
-        syslog(LOG_ERR, "[Network] 设置参数：%s=%s", options[i], options[i+1]);
+        syslog(LOG_INFO, "[Network] 设置参数：%s=%s", options[i], options[i+1]);
         struct uci_ptr param_ptr = {
             .package = "network",
             .section = "virtual_gw",  // 使用实际的段名称
@@ -94,20 +93,20 @@ int configure_network_interface(const struct config *cfg) {
         };
         
         if (uci_set(ctx, &param_ptr) != UCI_OK) {
-            syslog(LOG_ERR, "参数设置失败");
+            syslog(LOG_ERR, "[Network] 参数设置失败");
             ret = -3;
             goto cleanup;
         }
     }
-    syslog(LOG_ERR, "[Network] 接口参数设置成功");
+    syslog(LOG_INFO, "[Network] 接口参数设置成功");
 
     // 提交配置变更到持久化存储
     if (uci_commit(ctx, &pkg, false) != UCI_OK) {
-        syslog(LOG_ERR, "[Network] 配置提交失败");
+        syslog(LOG_ERR, "[Network] 配置配置保存失败");
         ret = -4;
         goto cleanup;
     }
-    syslog(LOG_ERR, "[Network] 接口配置保存成功");
+    syslog(LOG_INFO, "[Network] 接口配置保存成功");
 
 cleanup:
     // 资源清理（逆序释放）

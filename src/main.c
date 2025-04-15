@@ -175,12 +175,9 @@ int main(int argc, char *argv[]) {
         syslog(LOG_ERR, "[main] 当前设备为旁路由");
         side_loop(&cfg);
     }
-    // 主循环（替换原有close(lock_fd)）
     while(1) {
-        pause(); // 等待信号
+        pause();
     }
-    
-    // 理论上不会执行到这里
     closelog();
     return 0;
 }

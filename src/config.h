@@ -42,7 +42,6 @@ struct config {
 
     /*----- 虚拟接口配置 -----*/
     struct {
-        char proto[MAX_PROTO_LEN];  // 协议类型 static/dhcp
         char device[MAX_DEVICE_LEN];// 绑定物理设备
         char ipaddr[MAX_IP_LEN];    // 虚拟接口IP
         char netmask[MAX_IP_LEN];   // 子网掩码

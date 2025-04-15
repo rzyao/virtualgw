@@ -17,7 +17,7 @@
  * 4. 错误处理和资源释放
  */
 config_error_t config_load(struct config *cfg) {
-    syslog(LOG_ERR, "[Config] 执行config_load");
+    syslog(LOG_INFO, "[Config] 执行config_load");
     struct uci_context *ctx = uci_alloc_context();
     struct uci_package *pkg = NULL;
     int res = CONFIG_ERR_OK;
@@ -31,10 +31,9 @@ config_error_t config_load(struct config *cfg) {
         res = CONFIG_ERR_UCI_LOAD;
         goto cleanup;
     }
-    syslog(LOG_ERR, "[Config] 配置读取成功");
+    syslog(LOG_INFO, "[Config] 配置读取成功");
 
     //--------------------- 解析global段 ---------------------
-    syslog(LOG_ERR, "[Config] 解析global段");
     struct uci_section *global_sec = uci_lookup_section(ctx, pkg, "global");
     if (!global_sec) {
         syslog(LOG_ERR, "[Config] 缺少global段，请检查配置文件结构");
@@ -42,7 +41,6 @@ config_error_t config_load(struct config *cfg) {
         goto cleanup;
     }
 
-    // 解析全局参数
     cfg->global.log_level = uci_get_int_default(ctx, global_sec, "log_level", 1);
     
     const char *state = uci_lookup_option_string(ctx, global_sec, "state");
@@ -71,20 +69,11 @@ config_error_t config_load(struct config *cfg) {
     cfg->global.check_interval = uci_get_int_default(ctx, global_sec, "check_interval", 2);
 
     //------------------- 解析interface段 --------------------
-    syslog(LOG_ERR, "[Config] 解析interface段");
     struct uci_section *if_sec = uci_lookup_section(ctx, pkg, "virtual_gw");
     if (!if_sec) {
         syslog(LOG_ERR, "[Config] 缺少virtual_gw接口段，请检查配置文件");
         res = CONFIG_ERR_MISSING_SECTION;
         goto cleanup;
-    }
-    
-    // 解析接口参数（必填项）
-    const char *proto = uci_lookup_option_string(ctx, if_sec, "proto");
-    if (proto) {
-        strncpy(cfg->interface.proto, proto, MAX_PROTO_LEN - 1);
-    } else {
-        strncpy(cfg->interface.proto, "static", MAX_PROTO_LEN - 1);
     }
     
     const char *device = uci_lookup_option_string(ctx, if_sec, "device");

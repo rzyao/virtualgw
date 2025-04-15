@@ -28,7 +28,7 @@ int detect_lan_peer(const char *peer_ip) {
         if (ret == 0) {
             success_count++;
         }
-        usleep(300000);  // 0.3秒
+        usleep(500000);  // 0.5秒
     }
     
     return (success_count >= 2) ? 0 : 1;
@@ -46,11 +46,11 @@ void* master_loop(struct config *cfg) {
         
         // 仅当旁路由在线时查询其外网状态
         if (peer_online == 0) { 
-            syslog(LOG_DEBUG, "[Master] 旁路由在线");
+            syslog(LOG_INFO, "[Master] 旁路由在线");
             disable_network_interface("virtual_gw");
         }
         else {
-            syslog(LOG_DEBUG, "[Master] 旁路由离线");
+            syslog(LOG_INFO, "[Master] 旁路由离线");
             enable_network_interface("virtual_gw");
         }
         sleep(cfg->global.check_interval); // 等待下一个检测周期
